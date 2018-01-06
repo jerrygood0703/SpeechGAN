@@ -11,6 +11,28 @@ import random
 from sklearn import preprocessing
 import tensorflow as tf
 
+_n_fft = 512
+_hop_length = 256
+
+def cal_minmax(file_list):
+    data = np.zeros(((_n_fft/2)+1, 3000000), dtype=np.float32)
+    cnt_idx = 0
+    for filename in file_list:
+        sr, y = wav.read(filename)
+        if sr != 16000:
+            raise ValueError('Sampling rate is expected to be 16kHz!')
+        if y.dtype!='float32':
+            y = np.float32(y/32767.)
+
+        D=librosa.stft(y,n_fft=_n_fft,hop_length=_hop_length,win_length=_n_fft,window=scipy.signal.hamming)
+        Sxx=np.log10(abs(D)**2) 
+        data[:, cnt_idx:cnt_idx+Sxx.shape[1]] = Sxx
+        cnt_idx += Sxx.shape[1]
+
+    _max = np.max(data, axis=1).reshape(((_n_fft/2)+1, 1))
+    _min = np.min(data, axis=1).reshape(((_n_fft/2)+1, 1))      
+    return _max, _min
+
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
@@ -59,22 +81,26 @@ class dataPreprocessor(object):
         signals = self.slice_signal(wav_data, self.FRAMELENGTH, self.OVERLAP)
         return signals  
 
-    def make_spectrum(self, filename, use_normalize):
+    def make_spectrum(self, filename, normalize_mode=None, _max=None, _min=None):
         sr, y = wav.read(filename)
         if sr != 16000:
             raise ValueError('Sampling rate is expected to be 16kHz!')
         if y.dtype!='float32':
             y = np.float32(y/32767.)
 
-        D=librosa.stft(y,n_fft=512,hop_length=256,win_length=512,window=scipy.signal.hamming)
+        D=librosa.stft(y,n_fft=_n_fft,hop_length=_hop_length,win_length=_n_fft,window=scipy.signal.hamming)
         Sxx=np.log10(abs(D)**2) 
-        if use_normalize:
-            mean = np.mean(Sxx, axis=1).reshape((257,1))
-            std = np.std(Sxx, axis=1).reshape((257,1))+1e-12
+        if normalize_mode=='mean_std':
+            mean = np.mean(Sxx, axis=1).reshape(((_n_fft/2)+1, 1))
+            std = np.std(Sxx, axis=1).reshape(((_n_fft/2)+1, 1))+1e-12
             Sxx = (Sxx-mean)/std  
+        elif normalize_mode=='minmax':
+            Sxx = 2 * (Sxx - _min)/(_max - _min) - 1
+        print(np.max(Sxx), np.min(Sxx))
         slices = []
         for i in range(0, Sxx.shape[1]-self.FRAMELENGTH, self.OVERLAP):
-            slices.append(Sxx[1:,i:i+self.FRAMELENGTH]) # frequency bin = 256d
+            # frequency bin = 256d
+            slices.append(Sxx[1:,i:i+self.FRAMELENGTH]) 
         return np.array(slices)   
 
     def write_tfrecord(self):
@@ -109,10 +135,12 @@ class dataPreprocessor(object):
             out_file.close()
 
         else:
+            # Calculate min and max of entire training data
+            _max, _min = cal_minmax(clist)
             for n,c in zip(nlist, clist):
                 print(n,c)
-                wav_signals = self.make_spectrum(c, False)
-                noisy_signals = self.make_spectrum(n, True)
+                wav_signals = self.make_spectrum(c, 'minmax', _max, _min)
+                noisy_signals = self.make_spectrum(n, 'mean_std')
                 for (wav, noisy) in zip(wav_signals, noisy_signals):
                     print(wav.shape, noisy.shape)
                     wav_raw = wav.tostring()

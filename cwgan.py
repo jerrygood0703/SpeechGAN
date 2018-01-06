@@ -6,6 +6,7 @@ import os
 import tensorflow as tf
 import numpy as np
 from ops import *
+from data_utils import *
 import re
 
 class GradientPenaltyWGAN(object):
@@ -62,8 +63,9 @@ class GradientPenaltyWGAN(object):
         fake_clean = self.g_net(z, reuse=False)
 
         # Split into multiple frequency range to discriminate
-        split_fake = tf.split(fake_clean, len(self.d_net)-1, axis=2)
-        split_real = tf.split(self.real_clean, len(self.d_net)-1, axis=2)
+        if len(self.d_net) > 1:
+            split_fake = tf.split(fake_clean, len(self.d_net)-1, axis=2)
+            split_real = tf.split(self.real_clean, len(self.d_net)-1, axis=2)
         # ===================
         # # For losses
         # ===================
@@ -88,7 +90,7 @@ class GradientPenaltyWGAN(object):
             d_fake_list.append(df)
             d_gp_list.append(gp)
             Wdist = dr - df
-            self.d_losses.append(-Wdist + self.lamb_gp*gp + 0.001*(tf.square(dr)+tf.square(df)))
+            self.d_losses.append(-Wdist + self.lamb_gp*gp)#+ 0.01*((tf.square(dr) + tf.square(df))/2))
             self.g_losses.append(-df)
              
         self.loss = dict()
@@ -105,28 +107,24 @@ class GradientPenaltyWGAN(object):
         # ===================
         # # For summaries
         # ===================
-        sum_Wdist = tf.summary.scalar('Wdist', self.d_losses[0])
-        sum_Wdist1 = tf.summary.scalar('Wdist1', self.d_losses[1])
-        sum_Wdist2 = tf.summary.scalar('Wdist2', self.d_losses[2])
-        sum_gp = tf.summary.scalar('GP', self.d_losses[0])
-        sum_gp1 = tf.summary.scalar('GP1', self.d_losses[1])
-        sum_gp2 = tf.summary.scalar('GP2', self.d_losses[2])
+        sum_l_D = []
+        for i in range(len(self.d_net)):
+            sum_l_D.append(tf.summary.scalar('Wdist'+str(i), self.d_losses[i]))
+            sum_l_D.append(tf.summary.scalar('GP'+str(i), d_gp_list[i]))
         sum_l_G = tf.summary.scalar('l_G', self.loss['l_G'])
 
         # sum_noise = tf.summary.audio('fake_noise', tf.reshape(self.fake_noise,(int(self.fake_noise.get_shape()[0]), -1)), 16000)       
         # sum_clean = tf.summary.audio('enhanced', tf.reshape(e_clean,(int(e_clean.get_shape()[0]), -1)), 16000)
 
-        self.D_summs = [sum_Wdist, sum_Wdist1, sum_Wdist2]
+        self.D_summs = sum_l_D
         self.G_summs = [sum_l_G]
 
-        g_opt, d_opt, d1_opt, d2_opt = None, None, None, None
+        g_opt = None
+        d_opt = [None] * len(self.d_net)
         with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
-            d_opt = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5, beta2=0.9)\
-                .minimize(self.d_losses[0], var_list=self.d_net[0].vars)
-            d1_opt = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5, beta2=0.9)\
-                .minimize(self.d_losses[1], var_list=self.d_net[1].vars)
-            d2_opt = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5, beta2=0.9)\
-                .minimize(self.d_losses[2], var_list=self.d_net[2].vars)
+            for i in range(len(self.d_net)):    
+                d_opt[i] = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5, beta2=0.9)\
+                    .minimize(self.d_losses[i], var_list=self.d_net[i].vars)
             g_opt = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5, beta2=0.9)\
                 .minimize(self.loss['l_G'], var_list=self.g_net.vars)
             # self.d_opt = tf.train.RMSPropOptimizer(learning_rate=self.lr)\
@@ -138,10 +136,11 @@ class GradientPenaltyWGAN(object):
         config.gpu_options.allocator_type = 'BFC'
         self.sess = tf.Session(config=config)
 
-        return d_opt, d1_opt, d2_opt, g_opt
+        return d_opt, g_opt
 
     def _generate_noise_with_shape(self, x=None, batch_size=8):
         ''' iW-GAN used Gaussian noise '''
+        # default mean=0.0, stddev=1.0
         with tf.name_scope('Z'):
             if x==None:
                 z = tf.random_normal([batch_size, self.z_dim], name='z') 
@@ -165,7 +164,7 @@ class GradientPenaltyWGAN(object):
         return tf.reduce_mean(penalty)
 
     def train(self, mode="stage1", iters=65000):
-        d_opt, d1_opt, d2_opt, g_opt = self.loss()
+        d_opt, g_opt = self.loss()
 
         self.sess.run(tf.global_variables_initializer())
 
@@ -206,7 +205,7 @@ class GradientPenaltyWGAN(object):
             while not coord.should_stop():
                 for i in range(iters):
                     if i%100==0:
-                        fetch_list = [d_opt, d1_opt, d2_opt, g_opt, d_merged, g_merged]
+                        fetch_list = d_opt + [g_opt, d_merged, g_merged]
                         fetched = self.sess.run(fetch_list)
                         # writer.add_summary(fetched[3], i)
                         # writer.add_summary(fetched[4], i)
@@ -220,12 +219,12 @@ class GradientPenaltyWGAN(object):
                         # G_writer.add_summary(summary, i)
                         print("\rIter:{}".format(i))
                     else:
-                        for _ in range(5):
-                            _,_,_ = self.sess.run([d_opt, d1_opt, d2_opt])  
+                        for _ in range(1):
+                            _ = self.sess.run(d_opt)  
                         _ = self.sess.run([g_opt])
 
-                    if i % 5000 == 4999:
-                        saver.save(self.sess, save_path + 'model', global_step=i)
+                    if i % 2000 == 1999:
+                        saver.save(self.sess, save_path + 'model', global_step=i+1)
                     if i == iters-1:
                         coord.request_stop()
 
@@ -260,14 +259,18 @@ class GradientPenaltyWGAN(object):
                     slices.append(slice_)
             return np.array(slices, dtype=np.int32)
 
-        def make_spectrum_phase(y, FRAMELENGTH, OVERLAP):
+        def make_spectrum_phase(y, FRAMELENGTH, OVERLAP, _max=None, _min=None):
             D = librosa.stft(y,n_fft=512,hop_length=256,win_length=512,window=scipy.signal.hamming)
             Sxx = np.log10(abs(D)**2) 
             phase = np.exp(1j * np.angle(D))
-            mean = np.mean(Sxx, axis=1).reshape((257,1))
-            std = np.std(Sxx, axis=1).reshape((257,1))+1e-12
-            Sxx = (Sxx-mean)/std  
-            return Sxx, phase, mean, std
+            if _max.all() == None or _min.all() == None:
+                mean = np.mean(Sxx, axis=1).reshape((257,1))
+                std = np.std(Sxx, axis=1).reshape((257,1))+1e-12
+                Sxx = (Sxx-mean)/std  
+                return Sxx, phase, mean, std
+            else:
+                Sxx = 2 * (Sxx - _min)/(_max - _min) - 1       
+                return Sxx, phase, None, None         
 
         def recons_spec_phase(Sxx_r, phase):
             Sxx_r = np.sqrt(10**Sxx_r)
@@ -292,7 +295,9 @@ class GradientPenaltyWGAN(object):
             inverse = librosa.istft(full, hop_length = hop_length, window = scipy.signal.hamming)
 
             return inverse
+
         _ = self.loss()
+
         if x_test.get_shape()[3] > 1:
             FRAMELENGTH = 64
             OVERLAP = 64
@@ -300,126 +305,98 @@ class GradientPenaltyWGAN(object):
             FRAMELENGTH = 16384
             OVERLAP = 16384  
 
-        # Load model          
+        predefined_z = np.random.normal(0.0, 1.0, [5,128])
+        # Load model         
         with open(test_path + "checkpoint", 'r') as f:
-            line = f.readline()
-        latest_step = re.sub("[^0-9]", "", line)
-        print(latest_step)
-        with tf.device("/cpu:0"):
-            saver = tf.train.Saver()
-            saver.restore(self.sess, test_path + "model-" + latest_step)
+            for line in f:
+                latest_step = re.sub("[^0-9]", "", line)
+                print("checkpoint = " + str(latest_step))
+                with tf.device("/cpu:0"):
+                    saver = tf.train.Saver()
+                    saver.restore(self.sess, test_path + "model-" + latest_step)
 
-        # =====================================
-        # For enhancement on noisy testing list
-        # =====================================
-        # nlist = [_[:-1] for _ in open(test_list).readlines()]
-        # for name in nlist:
-        #     sr, y = wav.read(name)
-        #     if sr != 16000:
-        #         raise ValueError('Sampling rate is expected to be 16kHz!')
-        #     # For spectrum data
-        #     if x_test.get_shape()[3] > 1:
-        #         if y.dtype!='float32':
-        #             y = np.float32(y/32767.)
-        #         spec, phase, mean, std = make_spectrum_phase(y, FRAMELENGTH, OVERLAP)
-        #         slices = []
-        #         for i in range(0, spec.shape[1]-FRAMELENGTH, OVERLAP):
-        #             slices.append(spec[:,i:i+FRAMELENGTH])
-        #         slices = np.array(slices).reshape((-1,1,257,32))
-        #         output = self.sess.run(enhanced,{x_test:slices})
-        #         count = 0
-        #         for i in range(0, spec.shape[1]-FRAMELENGTH, OVERLAP):
-        #             spec[:,i:i+FRAMELENGTH] = output[count,:,:,:]
-        #             count+=1
-        #         print(i)
-        #         # The un-enhanced part of spec should be un-normalized
-        #         spec[:, i:] = (spec[:, i:] * std) + mean
-        #         recons_y = recons_spec_phase(spec, phase)             
-        #         y_out = librosa.util.fix_length(recons_y, y.shape[0])
-        #         wav.write(test_path+"enhanced/"+name.split('/')[-1],16000,np.int16(y_out*32767))
-        #     # For waveform data
-        #     else:
-        #         temp = np.zeros(((y.shape[0]//FRAMELENGTH+1)*FRAMELENGTH))
-        #         temp[:y.shape[0]] = y
-        #         wav_data = temp
-        #         signals = slice_signal(wav_data, FRAMELENGTH, OVERLAP)
-        #         wave = (2./65535.) * (signals.astype(np.float32)-32767) + 1.
-        #         print(np.max(wave),np.min(wave))
-        #         wave = np.reshape(wave,(wave.shape[0],1,-1,1))
-        #         output = self.sess.run(enhanced,{x_test:wave})
-        #         output = output.flatten()
-        #         output = output[:y.shape[0]]
-        #         print(np.max(output),np.min(output))
-        #         # wav.write(test_path+"enhanced/"+name.split('/')[-1],16000,np.int16(output*32767))
-        #         temp_name = name.split('/')
-        #         wav.write(os.path.join(test_path,"enhanced",temp_name[-3],temp_name[-2],temp_name[-1]),16000,np.int16(output*32767))
+                clist = [x[:-1] for x in open('/mnt/hd-01/user_sylar/MHINTSYPD_100NS/trcleanlist_280').readlines()]
+                _max, _min = cal_minmax(clist)
 
-        sr, y = wav.read("/mnt/hd-01/user_sylar/MHINTSYPD_100NS/Training/Clean/mhint_21_01.wav")
-        if sr != 16000:
-            raise ValueError('Sampling rate is expected to be 16kHz!')
-        # For spectrum data
-        if y.dtype!='float32':
-            y = np.float32(y/32767.)
-        spec, phase, mean, std = make_spectrum_phase(y, FRAMELENGTH, OVERLAP)
-        slices = []
-        for i in range(0, spec.shape[1]-FRAMELENGTH, OVERLAP):
-            slices.append(spec[:,i:i+FRAMELENGTH])
-        slices = np.array(slices).reshape((-1,1,257,FRAMELENGTH))
-        slices = slices[:,:,1:,:]
-        batch_size = slices.shape[0]
-        # ====================================
-        # Initial utterance from random noise
-        # ===================================
-        z = self._generate_noise_with_shape(batch_size=batch_size)
-        clean = self.g_net(z, reuse=True)
-        generated_clean = self.sess.run(clean)
-        full_spec = np.zeros((257,FRAMELENGTH*batch_size))
-        for i,c in enumerate(generated_clean):
-            print(c.shape)
-            temp = np.sqrt(10**c)
-            full_spec[1:,FRAMELENGTH*i:FRAMELENGTH*(i+1)] = temp
+                sr, y = wav.read("/mnt/hd-01/user_sylar/MHINTSYPD_100NS/Training/Clean/mhint_21_01.wav")
+                if sr != 16000:
+                    raise ValueError('Sampling rate is expected to be 16kHz!')
+                # For spectrum data
+                if y.dtype!='float32':
+                    y = np.float32(y/32767.)
+                spec, phase, mean, std = make_spectrum_phase(y, FRAMELENGTH, OVERLAP, _max, _min)
+                slices = []
+                for i in range(0, spec.shape[1]-FRAMELENGTH, OVERLAP):
+                    slices.append(spec[:,i:i+FRAMELENGTH])
+                slices = np.array(slices).reshape((-1,1,257,FRAMELENGTH))
+                slices = slices[:,:,1:,:]
+                batch_size = slices.shape[0]
 
-        out_wave = griffinlim(full_spec, n_iter = 50, n_fft = 512, hop_length = 256)
-        wav.write("fake_clean.wav", 16000, np.int16(out_wave*32767.))
-        # ==================================
-        # Utterance after optimized on noisy
-        # ==================================
-        zv = tf.get_variable(name="noise",
-                            shape=[batch_size, self.z_dim], 
-                            dtype=tf.float32, 
-                            initializer=tf.random_normal_initializer(0.0, 1.0))
-        clean = self.g_net(zv, reuse=True)
-        # mse_loss = tf.reduce_mean(tf.abs(clean - x_test))
-        mse_loss = tf.reduce_mean(tf.squared_difference(clean, x_test))
+                _max = _max[1:, :]
+                _min = _min[1:, :]
+                # ====================================
+                # Initial utterance from random noise
+                # ===================================
+                z = self._generate_noise_with_shape(batch_size=5)
+                # z = tf.placeholder("float", [5, 128], name='random_noise')
+                clean = self.g_net(z, reuse=True)
+                generated_clean = self.sess.run(clean)
+                full_spec = np.zeros((257,FRAMELENGTH*5))
+                for i,c in enumerate(generated_clean):
+                    print(c.shape)
+                    c = (c+1)/2 * (_max - _min) + _min
+                    temp = np.sqrt(10**c)
+                    # print(temp)
+                    temp = np.clip(temp, -10, 10)
+                    full_spec[1:,FRAMELENGTH*i:FRAMELENGTH*(i+1)] = temp
 
-        opt = tf.train.GradientDescentOptimizer(learning_rate=1.0)\
-            .minimize(mse_loss, var_list=zv)
+                out_wave = griffinlim(full_spec, n_iter = 50, n_fft = 512, hop_length = 256)
+                check_dir(os.path.join(test_path, 'generated'))
+                wav.write(os.path.join(test_path, 'generated')+"/fake_clean_"+str(latest_step)+".wav",
+                        16000, np.int16(out_wave*32767.))
+                # ==================================
+                # Utterance after optimized on noisy
+                # ==================================
+                # zv = tf.get_variable(name="noise",
+                #                     shape=[batch_size, self.z_dim], 
+                #                     dtype=tf.float32, 
+                #                     initializer=tf.random_normal_initializer(0.0, 1.0))
+                # clean = self.g_net(zv, reuse=True)
+                # # mse_loss = tf.reduce_mean(tf.abs(clean - x_test))
+                # mse_loss = tf.reduce_mean(tf.squared_difference(clean, x_test))
 
-        init = tf.variables_initializer([zv])
-        self.sess.run(init)
+                # opt = tf.train.GradientDescentOptimizer(learning_rate=1.0)\
+                #     .minimize(mse_loss, var_list=zv)
 
-        best_loss = 100.
-        cnt = 0
-        for _ in range(10000):
-            _, loss = self.sess.run([opt, mse_loss], feed_dict={x_test: slices})
-            print(loss)
-            if best_loss <= loss:
-                cnt += 1
-                if cnt > 3:
-                    break
-            else:
-                best_loss = loss
+                # init = tf.variables_initializer([zv])
+                # self.sess.run(init)
 
-        generated_clean = self.sess.run(clean)
-        print(np.mean((generated_clean - slices)**2))
-        full_spec = np.zeros((257,FRAMELENGTH*batch_size))
-        for i,c in enumerate(generated_clean):
-            print(c.shape)
-            temp = np.sqrt(10**c)
-            full_spec[1:,FRAMELENGTH*i:FRAMELENGTH*(i+1)] = temp
+                # best_loss = 100.
+                # cnt = 0
+                # for iters in range(10000):
+                #     _, loss = self.sess.run([opt, mse_loss], feed_dict={x_test: slices})
+                #     print(loss)
 
-        out_wave = griffinlim(full_spec, n_iter = 50, n_fft = 512, hop_length = 256)
-        wav.write("fake_enhancement.wav", 16000, np.int16(out_wave*32767.))
+                #     if iters % 50 == 0:
+                #         generated_clean = self.sess.run(clean)
+                #         print(np.mean((generated_clean - slices)**2))
+                #         full_spec = np.zeros((257,FRAMELENGTH*batch_size))
+                #         for i,c in enumerate(generated_clean):
+                #             print(c.shape)
+                #             c = (c+1)/2 * (_max - _min) + _min
+                #             temp = np.sqrt(10**c)
+                #             full_spec[1:,FRAMELENGTH*i:FRAMELENGTH*(i+1)] = temp
+
+                #         out_wave = griffinlim(full_spec, n_iter = 50, n_fft = 512, hop_length = 256)
+                #         wav.write("fake_enhancement.wav", 16000, np.int16(out_wave*32767.))
+
+                #     if best_loss <= loss:
+                #         cnt += 1
+                #         if cnt > 3 :
+                #             break
+                #     else:
+                #         best_loss = loss
+
 
 
 

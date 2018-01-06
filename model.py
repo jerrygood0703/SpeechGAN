@@ -17,9 +17,9 @@ class Noise_generator(object):
     def __call__(self, z, reuse=True):
         ngf = 16
         layer_specs = [
-            ngf * 4, # [batch, ngf*16, 32, 1] => [batch, ngf*16, 64, 1]
-            ngf * 8, # [batch, ngf*16, 64, 1] => [batch, ngf*16, 128, 1]
-            ngf * 16,  # [batch, ngf*16, 128, 1] => [batch, ngf*8, 256, 1]
+            ngf * 6, # [batch, ngf*16, 32, 1] => [batch, ngf*16, 64, 1]
+            ngf * 12, # [batch, ngf*16, 64, 1] => [batch, ngf*16, 128, 1]
+            ngf * 24,  # [batch, ngf*16, 128, 1] => [batch, ngf*8, 256, 1]
         ]
         layers = []
         with tf.device('/gpu:0'):
@@ -41,6 +41,12 @@ class Noise_generator(object):
                     layers.append(output)
                     output = residual_block(layers[-1], out_channels, [12,3], name=name+"_3")
                     layers.append(output)
+                    # output = residual_block(layers[-1], out_channels, [12,3], name=name+"_4")
+                    # layers.append(output)
+                    # output = residual_block(layers[-1], out_channels, [12,3], name=name+"_5")
+                    # layers.append(output)
+                    # output = residual_block(layers[-1], out_channels, [12,3], name=name+"_6")
+                    # layers.append(output)
                     h = tf.layers.batch_normalization(layers[-1], axis=1, name=name+'bn')
                     h = activation(h, 'prelu', name+'act')
                     output = deconv2D_up(h, out_channels*2, [12,3], [1,1,1,1], name=name)
@@ -161,6 +167,64 @@ class Discriminator(object):
     def __init__(self, name="discriminator"):
         self.name = name
     def __call__(self, noisy=None, clean=None, reuse=True):       
+        n_layers = 3
+        ndf = 16
+        layers = []
+        with tf.device('/gpu:0'):
+            with tf.variable_scope(self.name) as vs:
+                if reuse:
+                    vs.reuse_variables()
+                # 2x [batch, in_channels, height, width] => [batch, in_channels * 2, height, width]
+                if noisy != None:
+                    input = tf.concat([noisy, clean], axis=1)
+                else:
+                    input = clean
+                name = 'dlayer_1'
+                convolved = conv2d(input, ndf, [3,3], [1,1,2,2], name=name)
+                rectified = activation(convolved, 'lrelu', name+'_activation')
+                layers.append(rectified)
+
+                # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
+                # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
+                # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
+                for i in range(n_layers):
+                    name = "dlayer_%d" % (len(layers) + 1)
+                    out_channels = ndf * min(2**(i+1), 8)
+                    stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
+                    convolved = conv2d(layers[-1], out_channels, [3,3], [1,1,stride,stride], name=name)
+                    normalized = layernorm(convolved, axis=[1, 2, 3], name=name+'_layernorm')
+                    rectified = activation(normalized, 'lrelu', name+'_activation')
+                    layers.append(rectified)
+
+                # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
+                name = "dlayer_%d" % (len(layers) + 1)
+                convolved = conv2d(layers[-1], 1, [3,3], [1,1,1,1], name=name)
+                normalized = layernorm(convolved, axis=[1, 2, 3], name=name+'_layernorm')
+                rectified = activation(normalized, 'lrelu', name+'_activation')
+                layers.append(rectified)
+
+                with tf.variable_scope("fully_connected"):
+                    flatten = tf.contrib.layers.flatten(layers[-1])
+                    fc1 = tf.contrib.layers.fully_connected(flatten, 256, activation_fn=None)
+                    normalized = layernorm(fc1, axis=[1], name='layernorm')
+                    rectified = activation(normalized, 'lrelu')
+                    final = tf.contrib.layers.fully_connected(rectified, 1, activation_fn=None)
+                    layers.append(final)
+
+        print("Discriminator:")
+        for l in layers:
+            print(l.get_shape())
+
+        return layers[-1]
+
+    @property
+    def vars(self):
+        return [var for var in tf.global_variables() if self.name in var.name] 
+
+class glob_Discriminator(object):
+    def __init__(self, name="discriminator"):
+        self.name = name
+    def __call__(self, noisy=None, clean=None, reuse=True):       
         n_layers = 4
         ndf = 32
         layers = []
@@ -185,7 +249,7 @@ class Discriminator(object):
                     name = "dlayer_%d" % (len(layers) + 1)
                     out_channels = ndf * min(2**(i+1), 8)
                     stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-                    convolved = conv2d(layers[-1], out_channels, [6,3], [1,1,stride,stride], name=name)
+                    convolved = conv2d(layers[-1], out_channels, [12,3], [1,1,stride,stride], name=name)
                     normalized = layernorm(convolved, axis=[1, 2, 3], name=name+'_layernorm')
                     rectified = activation(normalized, 'lrelu', name+'_activation')
                     layers.append(rectified)
