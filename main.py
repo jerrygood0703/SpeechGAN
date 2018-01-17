@@ -25,15 +25,16 @@ FRAMELENGTH = 64
 OVERLAP = 64
 
 mode = sys.argv[1] # stage1, stage2, test
-log_path = 'stage1_log/20180103-mhint'
-model_path = 'stage1_model/model_20180103-segan/'
+log_path = 'stage1_log/20180103-segan-277'
+model_path = 'stage1_model/model_20180103-segan-277/'
 model_path2 = 'dummy/'
 test_path = model_path # switch between stage1 and stage2
-test_list = "/mnt/gv0/user_sylar/TMHINT/tsnoisylist"
-record_path = "/mnt/hd-01/user_sylar/MHINTSYPD_100NS"
-record_name = "/data_spec_clean_minmax.tfrecord"
-# record_path = "/mnt/gv0/user_sylar/segan_data"
-# record_name = "/p274_spec_clean_minmax.tfrecord"
+# test_list = "/mnt/hd-01/user_sylar/MHINTSYPD_100NS/trcleanlist_280"
+test_list = "/mnt/gv0/user_sylar/segan_data/p277_clean_list"
+# record_path = "/mnt/hd-01/user_sylar/MHINTSYPD_100NS"
+# record_name = "/data_spec_clean_minmax.tfrecord"
+record_path = "/mnt/gv0/user_sylar/segan_data"
+record_name = "/p277_spec_clean_minmax.tfrecord"
 
 if use_waveform:
     E=Enhancer((1,2,3),(1,2,3))
@@ -46,7 +47,8 @@ else:
     D2=Discriminator(name='D2')
     D3=Discriminator(name='D3')
     D4=Discriminator(name='D4')
-
+    D_list = [D,D1,D2,D3,D4]
+    
 check_dir(log_path)
 check_dir(model_path)
 check_dir(model_path2)
@@ -55,7 +57,7 @@ with tf.device('cpu'):
     reader = dataPreprocessor(record_path, record_name, use_waveform=use_waveform)
     clean, noisy = reader.read_and_decode(batch_size=batch_size,num_threads=32)
 #with tf.device('gpu'):
-gan = GradientPenaltyWGAN(G,[D],noisy,clean,log_path,model_path,use_waveform,lr=learning_rate)
+gan = GradientPenaltyWGAN(G,D_list,noisy,clean,log_path,model_path,use_waveform,lr=learning_rate)
 
 if mode=='test':
     if use_waveform:
